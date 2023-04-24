@@ -7,20 +7,28 @@ from typing import (
     Union,
     Iterable,
     Iterator,
+    List,
 )
 import struct
 
-import numpy as np
-
 from ray.util.annotations import PublicAPI
 from ray.data._internal.util import _check_import
+from ray.data._internal.datastream_logger import DatastreamLogger
 from ray.data.block import Block, BlockAccessor
 from ray.data.datasource.file_based_datasource import FileBasedDatasource
+
+
+from ray.data.aggregate import AggregateFn
 
 if TYPE_CHECKING:
     import pyarrow
     import tensorflow as tf
+    import pandas as pd
     from tensorflow_metadata.proto.v0 import schema_pb2
+    from ray.data import Datastream
+
+
+logger = DatastreamLogger(__name__)
 
 
 @PublicAPI(stability="alpha")
@@ -29,7 +37,75 @@ class TFRecordDatasource(FileBasedDatasource):
 
     _FILE_EXTENSION = "tfrecords"
 
+    def __init__(self, filesystem: Optional["pyarrow.fs.FileSystem"]):
+        # TODO: remove filesystem assignment after
+        #  https://github.com/ray-project/ray/issues/33777 is resolved
+        self._fs = filesystem
+        super(TFRecordDatasource, self).__init__()
+
     def _read_stream(
+        self, f: "pyarrow.NativeFile", path: str, **reader_args
+    ) -> Iterator[Block]:
+        import platform
+
+        try:
+            from tfx_bsl.cc.tfx_bsl_extension.coders import (  # noqa: F401
+                ExamplesToRecordBatchDecoder,
+            )
+        except ModuleNotFoundError:
+            if platform.processor() == "arm":
+                logger.get_logger().warning(
+                    "This function depends on tfx-bsl which is currently not supported"
+                    " on devices with Apple silicon (e.g. M1) and requires an"
+                    " environment with x86 CPU architecture."
+                )
+            else:
+                logger.get_logger().warning(
+                    "To use TFRecordDatasource with large datasets, please install"
+                    " tfx-bsl package with pip install tfx_bsl --no-dependencies`."
+                )
+            logger.get_logger().info(
+                "Falling back to slower strategy for reading tf.records. This"
+                "reading strategy should be avoided when reading large datasets."
+            )
+
+            yield from self._slow_read(f, path, **reader_args)
+            return
+
+        yield from self._fast_read(f, path, **reader_args)
+
+    def _fast_read(
+        self, f: "pyarrow.NativeFile", path: str, **reader_args
+    ) -> Iterator[Block]:
+        import pyarrow as pa
+        import tensorflow as tf
+        from tfx_bsl.cc.tfx_bsl_extension.coders import ExamplesToRecordBatchDecoder
+
+        batch_size = reader_args.get("batch_size", 2048)
+        compression = reader_args.get("arrow_open_stream_args", {}).get(
+            "compression", None
+        )
+        tf_schema: Optional["schema_pb2.Schema"] = reader_args.get("tf_schema", None)
+
+        if not self._fs:
+            self._fs = pyarrow.fs.LocalFileSystem()
+
+        full_path = _get_full_file_path(self._fs, path)
+
+        if compression:
+            compression = compression.upper()
+
+        if tf_schema:
+            tf_schema = tf_schema.SerializeToString()
+
+        decoder = ExamplesToRecordBatchDecoder(tf_schema)
+
+        for record in tf.data.TFRecordDataset(
+            full_path, compression_type=compression
+        ).batch(batch_size):
+            yield pa.Table.from_batches([decoder.DecodeBatch(record.numpy())])
+
+    def _slow_read(
         self, f: "pyarrow.NativeFile", path: str, **reader_args
     ) -> Iterator[Block]:
         from google.protobuf.message import DecodeError
@@ -73,6 +149,18 @@ class TFRecordDatasource(FileBasedDatasource):
         # Write each example to the arrow file in the TFRecord format.
         for example in examples:
             _write_record(f, example)
+
+
+def _get_full_file_path(file_system: "pyarrow.fs.FileSystem", path: str) -> str:
+    from pyarrow.fs import LocalFileSystem
+    from gcsfs import GCSFileSystem
+
+    if isinstance(file_system, GCSFileSystem):
+        return f"gs://{path}"
+    if isinstance(file_system, LocalFileSystem):
+        return f"file:///{path}"
+
+    raise Exception(f"unsupported filesystem: {file_system}")
 
 
 def _convert_example_to_dict(
@@ -379,6 +467,54 @@ def _read_records(
             raise RuntimeError(error_message) from e
 
 
+def unwrap_single_value_columns(dataset: "Datastream"):
+    list_sizes = dataset.aggregate(_MaxListSize(dataset.schema().names))
+
+    return dataset.map_batches(
+        _unwrap_single_value_lists,
+        fn_kwargs={"col_lengths": list_sizes["max_list_size"]},
+        batch_format="pandas",
+    )
+
+
+def _unwrap_single_value_lists(batch: "pd.DataFrame", col_lengths: Dict[str, int]):
+    for col in col_lengths:
+        if col_lengths[col] == 1:
+            batch[col] = batch[col].str[0]
+
+    return batch
+
+
+class _MaxListSize(AggregateFn):
+    def __init__(self, columns: List[str]):
+        self._columns = columns
+        super().__init__(
+            init=self._init,
+            merge=self._merge,
+            accumulate_row=self._accumulate_row,
+            finalize=lambda a: a,
+            name="max_list_size",
+        )
+
+    def _init(self, k: str):
+        return {col: 0 for col in self._columns}
+
+    def _merge(self, acc1: Dict[str, int], acc2: Dict[str, int]):
+        merged = {}
+        for col in self._columns:
+            merged[col] = max(acc1[col], acc2[col])
+
+        return merged
+
+    def _accumulate_row(self, acc: Dict[str, int], row: "pd.Series"):
+        for k in row:
+            value = row[k]
+            if value:
+                acc[k] = max(len(value), acc[k])
+
+        return acc
+
+
 # Adapted from https://github.com/vahidk/tfrecord/blob/74b2d24a838081356d993ec0e147eaf59ccd4c84/tfrecord/writer.py#L57-L72  # noqa: E501
 #
 # MIT License
@@ -420,6 +556,7 @@ def _write_record(
 def _masked_crc(data: bytes) -> bytes:
     """CRC checksum."""
     import crc32c
+    import numpy as np
 
     mask = 0xA282EAD8
     crc = crc32c.crc32(data)

@@ -623,6 +623,17 @@ def test_read_with_invalid_schema(
     )
 
 
+def test_gcs(ray_start_regular_shared):
+    from gcsfs import GCSFileSystem
+
+    ds = ray.data.read_tfrecords(
+        "gs://tfds-data/datasets/mnist/3.0.1/mnist-test.tfrecord-00000-of-00001",
+        filesystem=GCSFileSystem(),
+        schema_inference=False,
+    )
+    assert ds.count() == 10000
+
+
 if __name__ == "__main__":
     import sys
 
