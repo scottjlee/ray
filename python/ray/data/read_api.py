@@ -16,6 +16,7 @@ from typing import (
 import numpy as np
 
 import ray
+from ray.data.datasource.tfrecords_datasource import unwrap_single_value_columns
 from ray.air.util.tensor_extensions.utils import _create_possibly_ragged_ndarray
 from ray.data._internal.block_list import BlockList
 from ray.data._internal.delegating_block_builder import DelegatingBlockBuilder
@@ -1176,6 +1177,7 @@ def read_tfrecords(
     partition_filter: Optional[PathPartitionFilter] = None,
     ignore_missing_paths: bool = False,
     tf_schema: Optional["schema_pb2.Schema"] = None,
+    schema_inference: bool = True,
 ) -> Datastream[TableRow]:
     """Create a datastream from TFRecord files that contain
     `tf.train.Example <https://www.tensorflow.org/api_docs/python/tf/train/Example>`_
@@ -1247,14 +1249,42 @@ def read_tfrecords(
             found. Defaults to False.
         tf_schema: Optional TensorFlow Schema which is used to explicitly set the schema
             of the underlying Datastream.
-
+        schema_inference: Toggles the schema inference applied; applicable only if
+            tf_schema argument is missing
     Returns:
         A :class:`~ray.data.Datastream` that contains the example features.
 
     Raises:
         ValueError: If a file contains a message that isn't a ``tf.train.Example``.
     """  # noqa: E501
-    return read_datasource(
+    import platform
+
+    fast_read = False
+
+    try:
+        from tfx_bsl.cc.tfx_bsl_extension.coders import (  # noqa: F401
+            ExamplesToRecordBatchDecoder,
+        )
+
+        fast_read = True
+    except ModuleNotFoundError:
+        if platform.processor() == "arm":
+            logger.warning(
+                "This function depends on tfx-bsl which is currently not supported"
+                " on devices with Apple silicon (e.g. M1) and requires an"
+                " environment with x86 CPU architecture."
+            )
+        else:
+            logger.warning(
+                "To use TFRecordDatasource with large datasets, please install"
+                " tfx-bsl package with pip install tfx_bsl --no-dependencies`."
+            )
+        logger.info(
+            "Falling back to slower strategy for reading tf.records. This"
+            "reading strategy should be avoided when reading large datasets."
+        )
+
+    ds = read_datasource(
         TFRecordDatasource(),
         parallelism=parallelism,
         paths=paths,
@@ -1264,7 +1294,14 @@ def read_tfrecords(
         partition_filter=partition_filter,
         ignore_missing_paths=ignore_missing_paths,
         tf_schema=tf_schema,
+        fast_read=fast_read,
+        skip_unwrap_path_protocol=True
     )
+
+    if schema_inference and fast_read and not tf_schema:
+        return unwrap_single_value_columns(ds)
+
+    return ds
 
 
 @PublicAPI(stability="alpha")

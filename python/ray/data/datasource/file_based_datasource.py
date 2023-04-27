@@ -387,7 +387,8 @@ class _FileBasedDatasourceReader(Reader):
         self._block_udf = _block_udf
         self._ignore_missing_paths = ignore_missing_paths
         self._reader_args = reader_args
-        paths, self._filesystem = _resolve_paths_and_filesystem(paths, filesystem)
+        skip_unwrap_path_protocol = reader_args.get("skip_unwrap_path_protocol", False)
+        paths, self._filesystem = _resolve_paths_and_filesystem(paths, filesystem, skip_unwrap_path_protocol)
         self._paths, self._file_sizes = map(
             list,
             zip(
@@ -600,6 +601,7 @@ def _add_partitions_to_dataframe(
 def _resolve_paths_and_filesystem(
     paths: Union[str, List[str]],
     filesystem: "pyarrow.fs.FileSystem" = None,
+    skip_unwrap_path_protocol = False,
 ) -> Tuple[List[str], "pyarrow.fs.FileSystem"]:
     """
     Resolves and normalizes all provided paths, infers a filesystem from the
@@ -693,7 +695,7 @@ def _resolve_paths_and_filesystem(
                 raise
         if filesystem is None:
             filesystem = resolved_filesystem
-        elif need_unwrap_path_protocol:
+        elif need_unwrap_path_protocol and not skip_unwrap_path_protocol:
             resolved_path = _unwrap_protocol(resolved_path)
         resolved_path = filesystem.normalize_path(resolved_path)
         resolved_paths.append(resolved_path)
