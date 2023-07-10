@@ -4,11 +4,14 @@ from typing import Any, Dict, Optional
 
 from ray_release.aws import RELEASE_AWS_BUCKET
 from ray_release.buildkite.concurrency import get_concurrency_group
+from ray_release.test import (
+    Test,
+    TestState,
+    DEFAULT_PYTHON_VERSION,
+)
 from ray_release.config import (
     DEFAULT_ANYSCALE_PROJECT,
     DEFAULT_CLOUD_ID,
-    DEFAULT_PYTHON_VERSION,
-    Test,
     as_smoke_test,
     parse_python_version,
 )
@@ -123,11 +126,16 @@ def get_step(
 
     # If a test is not stable, allow to soft fail
     stable = test.get("stable", True)
+    clone_test = copy.deepcopy(test)  # avoid modifying the original test
+    clone_test.update_from_s3()
+    jailed = clone_test.get_state() == TestState.JAILED
+    full_label = ""
     if not stable:
         step["soft_fail"] = True
-        full_label = "[unstable] "
-    else:
-        full_label = ""
+    if not stable:
+        full_label += "[unstable]"
+    if jailed:
+        full_label += "[jailed]"
 
     full_label += test["name"]
     if smoke_test:
