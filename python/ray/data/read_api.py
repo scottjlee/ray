@@ -16,7 +16,6 @@ from typing import (
 import numpy as np
 
 import ray
-from ray.data.datasource.tfrecords_datasource import unwrap_single_value_columns
 from ray._private.auto_init_hook import wrap_auto_init
 from ray.air.util.tensor_extensions.utils import _create_possibly_ragged_ndarray
 from ray.data._internal.block_list import BlockList
@@ -74,6 +73,7 @@ from ray.data.datasource.file_based_datasource import (
 )
 from ray.data.datasource.image_datasource import _ImageFileMetadataProvider
 from ray.data.datasource.partitioning import Partitioning
+from ray.data.datasource.tfrecords_datasource import unwrap_single_value_columns
 from ray.types import ObjectRef
 from ray.util.annotations import Deprecated, DeveloperAPI, PublicAPI
 from ray.util.placement_group import PlacementGroup
@@ -1464,7 +1464,7 @@ def read_tfrecords(
         ignore_missing_paths=ignore_missing_paths,
         tf_schema=tf_schema,
         fast_read=fast_read,
-        skip_unwrap_path_protocol=True
+        skip_unwrap_path_protocol=True,
     )
 
     if schema_inference and fast_read and not tf_schema:

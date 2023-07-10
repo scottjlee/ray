@@ -11,26 +11,23 @@ from typing import (
     Union,
 )
 
-import numpy as np
-
+from ray.data._internal.dataset_logger import DatasetLogger
 from ray.data._internal.util import _check_import
-from ray.data._internal.datastream_logger import DatastreamLogger
+from ray.data.aggregate import AggregateFn
 from ray.data.block import Block, BlockAccessor
 from ray.data.datasource.file_based_datasource import FileBasedDatasource
-
-
-from ray.data.aggregate import AggregateFn
 from ray.util.annotations import PublicAPI
 
 if TYPE_CHECKING:
+    import pandas as pd
     import pyarrow
     import tensorflow as tf
-    import pandas as pd
     from tensorflow_metadata.proto.v0 import schema_pb2
-    from ray.data import Datastream
+
+    from ray.data import Dataset
 
 
-logger = DatastreamLogger(__name__)
+logger = DatasetLogger(__name__)
 
 
 @PublicAPI(stability="alpha")
@@ -74,15 +71,14 @@ class TFRecordDatasource(FileBasedDatasource):
 
         decoder = ExamplesToRecordBatchDecoder(tf_schema)
 
-        for record in tf.data.TFRecordDataset(
-            path, compression_type=compression
-        ).batch(batch_size):
+        for record in tf.data.TFRecordDataset(path, compression_type=compression).batch(
+            batch_size
+        ):
             yield pa.Table.from_batches([decoder.DecodeBatch(record.numpy())])
 
     def _slow_read(
         self, f: "pyarrow.NativeFile", path: str, **reader_args
     ) -> Iterator[Block]:
-        from google.protobuf.message import DecodeError
         import pyarrow as pa
         import tensorflow as tf
         from google.protobuf.message import DecodeError
@@ -127,8 +123,8 @@ class TFRecordDatasource(FileBasedDatasource):
 
 
 def _get_full_file_path(file_system: "pyarrow.fs.FileSystem", path: str) -> str:
-    from pyarrow.fs import LocalFileSystem
     from gcsfs import GCSFileSystem
+    from pyarrow.fs import LocalFileSystem
 
     if isinstance(file_system, GCSFileSystem):
         return f"gs://{path}"
@@ -442,7 +438,7 @@ def _read_records(
             raise RuntimeError(error_message) from e
 
 
-def unwrap_single_value_columns(dataset: "Datastream"):
+def unwrap_single_value_columns(dataset: "Dataset"):
     list_sizes = dataset.aggregate(_MaxListSize(dataset.schema().names))
 
     return dataset.map_batches(
