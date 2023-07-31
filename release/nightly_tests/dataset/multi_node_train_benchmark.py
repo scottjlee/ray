@@ -133,6 +133,9 @@ if __name__ == "__main__":
             start_t = time.time()
             for batch in it.iter_batches(
                 batch_size=args.batch_size,
+                # Note(scott): Disabling local shuffle buffer size seems to make training run much faster,
+                # However, object store usage still goes well above the configured limit 
+                # (peaks at ~5GB, but with it enabled, goes to 11GB+)
                 local_shuffle_buffer_size=args.local_shuffle_buffer_size,
                 prefetch_batches=10,
             ):
@@ -145,6 +148,9 @@ if __name__ == "__main__":
     # 3) Train TorchTrainer on processed data
     options = DataConfig.default_ingest_options()
     options.preserve_order = args.preserve_order
+    # Note(scott): tried setting object store memory to 10GB, fills up and
+    # exceeds very quickly. Basically doesn't help unless we also disable local_shuffle_buffer size
+    # options.resource_limits.object_store_memory = 10e9
 
     torch_trainer = TorchTrainer(
         train_loop_per_worker,
@@ -152,6 +158,7 @@ if __name__ == "__main__":
         scaling_config=ScalingConfig(num_workers=args.num_workers),
         dataset_config=ray.train.DataConfig(
             execution_options=options,
+            # datasets_to_split=[],
         ),
     )
     result = torch_trainer.fit()
